@@ -1,0 +1,17 @@
+{
+  "name": "pi-clone-session",
+  "version": "0.1.0",
+  "description": "pi extension: clone the current session and point the clone at a different task",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
