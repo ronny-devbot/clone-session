@@ -1,5 +1,5 @@
 // Pure helpers for cloning a pi session file (no runtime deps, testable with plain node).
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { renameSync, writeFileSync } from "node:fs";
 
 /** Filename in pi's convention: <ISO timestamp with : and . as ->_<uuid>.jsonl */
@@ -69,6 +69,28 @@ export function truncateAfterLastUserMessage(content: string): string {
 		}
 	}
 	return cut === -1 ? content : lines.slice(0, cut + 1).join("\n");
+}
+
+/**
+ * pi-web subsession child-link entry (mirrors pi-web's persistSubsessionChildMarker:
+ * customType "pi-web.subsession.spawned"). Appended to the CHILD file: the daemon
+ * hydrates parents from it, so the child is tracked (list/check/read tools) and its
+ * completion is delivered to the parent.
+ */
+export function childLinkEntry(
+	parentSessionId: string,
+	childSessionId: string,
+	parentId: string,
+	now = new Date(),
+): string {
+	return JSON.stringify({
+		type: "custom",
+		customType: "pi-web.subsession.spawned",
+		data: { version: 1, spawnedBySessionId: parentSessionId, spawnedSessionId: childSessionId },
+		id: randomBytes(4).toString("hex"),
+		parentId,
+		timestamp: now.toISOString(),
+	});
 }
 
 /** Atomically write the cloned session file next to the source. */

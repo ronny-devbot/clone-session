@@ -1,6 +1,6 @@
 // Self-test: node test/selftest.ts
 import assert from "node:assert";
-import { cloneFilenameFor, dropTrailingPartialLine, rewriteHeaderId, truncateAfterLastUserMessage } from "../clone.ts";
+import { childLinkEntry, cloneFilenameFor, dropTrailingPartialLine, rewriteHeaderId, truncateAfterLastUserMessage } from "../clone.ts";
 
 // header + one entry, as pi writes it
 const file =
@@ -43,5 +43,14 @@ const cut = truncateAfterLastUserMessage(midTurn);
 assert.strictEqual(cut, file.replace(/\n$/, ""));
 // no user message yet: unchanged
 assert.strictEqual(truncateAfterLastUserMessage('{"type":"session","id":"x"}\n'), '{"type":"session","id":"x"}\n');
+
+// subsession child-link entry: shape matches pi-web's persisted format
+const link = JSON.parse(childLinkEntry("parent-1", "child-2", "leaf-9", now));
+assert.strictEqual(link.type, "custom");
+assert.strictEqual(link.customType, "pi-web.subsession.spawned");
+assert.deepStrictEqual(link.data, { version: 1, spawnedBySessionId: "parent-1", spawnedSessionId: "child-2" });
+assert.strictEqual(link.parentId, "leaf-9");
+assert.strictEqual(link.timestamp, "2026-06-06T06:06:06.006Z");
+assert.match(link.id, /^[0-9a-f]{8}$/);
 
 console.log("clone-session self-test: OK");

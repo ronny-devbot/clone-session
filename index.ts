@@ -10,6 +10,11 @@
  *   2. POSTs the given prompt to the session daemon for the clone, so the new
  *      session immediately starts doing something different.
  *
+ * `clone_subsession` does the same, plus appends pi-web's subsession child-link
+ * entry to the clone — the clone becomes a *tracked child* of the current session
+ * (parallel to spawn_subsession but with full history): its completion reports
+ * back here and list/check/read subsession tools see it.
+ *
  * Daemon endpoint resolution:
  *   $PI_WEB_SESSIOND_SOCKET → <PI_WEB_DATA_DIR|~/.pi-web>/sessiond-owner.json (.endpoint)
  *   → ~/.pi-web/sessiond.sock → last resort: web server proxy at 127.0.0.1:8504.
@@ -21,7 +26,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { Type } from "typebox";
-import { dropTrailingPartialLine, rewriteHeaderId, truncateAfterLastUserMessage, writeClone } from "./clone.ts";
+import { childLinkEntry, dropTrailingPartialLine, rewriteHeaderId, truncateAfterLastUserMessage, writeClone } from "./clone.ts";
 
 interface DaemonEndpoint {
 	/** unix socket path, or host:port for the daemon itself (no /api prefix) */
@@ -89,6 +94,58 @@ const Params = Type.Object({
 	}),
 });
 
+interface CloneRuntimeContext {
+	sessionManager: {
+		getSessionFile(): string | undefined;
+		getSessionId(): string | undefined;
+	};
+}
+
+// Shared clone flow: snapshot → (optional child-link) → write → prompt.
+async function runClone(
+	ctx: CloneRuntimeContext,
+	prompt: string,
+	options?: { linkParent?: boolean },
+): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> {
+	// pi-web runs all sessions in one process, so PI_SESSION_FILE is not in
+	// process.env — the session manager is the canonical source for the file.
+	const source = ctx.sessionManager.getSessionFile();
+	if (!source || !existsSync(source)) {
+		throw new Error("no session file on this runtime — cannot clone");
+	}
+	// Snapshot while this turn is running: guard against a half-written last line,
+	// then cut at the last user message so the clone doesn't inherit this in-progress turn.
+	const content = truncateAfterLastUserMessage(dropTrailingPartialLine(readFileSync(source, "utf8")));
+	const lines = content.split("\n");
+	const header = JSON.parse(lines[0]) as { cwd?: string };
+	const lastEntry = JSON.parse(lines[lines.length - 1]) as { id?: string };
+	const newId = randomUUID();
+	let clone = rewriteHeaderId(content, newId);
+	if (options?.linkParent) {
+		const parentId = ctx.sessionManager.getSessionId();
+		if (parentId && lastEntry.id)
+			clone += "\n" + childLinkEntry(parentId, newId, lastEntry.id);
+	}
+	const target = writeClone(source, newId, clone);
+	// The daemon scopes every session op by cwd — it comes from the session header.
+	const res = await daemonPost(`/sessions/${newId}/prompt`, JSON.stringify({ text: prompt, cwd: header.cwd }));
+	if (res.status < 200 || res.status >= 300) {
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Clone created as ${newId}, but the daemon rejected the prompt (HTTP ${res.status}: ${res.body}). Send it manually.`,
+				},
+			],
+			details: { sessionId: newId, file: target, promptAccepted: false },
+		};
+	}
+	return {
+		content: [{ type: "text", text: `Cloned this session as ${newId}; it is now working on your prompt.` }],
+		details: { sessionId: newId, file: target, promptAccepted: true, tracked: options?.linkParent === true },
+	};
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "clone_session",
@@ -98,40 +155,19 @@ export default function (pi: ExtensionAPI) {
 			"start it with a prompt so it works on something else. Returns the new session id.",
 		parameters: Params,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			// pi-web runs all sessions in one process, so PI_SESSION_FILE is not in
-			// process.env — the session manager is the canonical source for the file.
-			const source = ctx.sessionManager.getSessionFile();
-			if (!source || !existsSync(source)) {
-				throw new Error("no session file on this runtime — cannot clone");
-			}
-			// Snapshot while this turn is running: guard against a half-written last line,
-			// then cut at the last user message so the clone doesn't inherit this in-progress turn.
-			const content = truncateAfterLastUserMessage(dropTrailingPartialLine(readFileSync(source, "utf8")));
-			const header = JSON.parse(content.split("\n")[0]) as { cwd?: string };
-			const newId = randomUUID();
-			const target = writeClone(source, newId, rewriteHeaderId(content, newId));
-			// The daemon scopes every session op by cwd — it comes from the session header.
-			const res = await daemonPost(
-				`/sessions/${newId}/prompt`,
-				JSON.stringify({ text: params.prompt, cwd: header.cwd }),
-			);
-			if (res.status < 200 || res.status >= 300) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Clone created as ${newId}, but the daemon rejected the prompt (HTTP ${res.status}: ${res.body}). Send it manually.`,
-						},
-					],
-					details: { sessionId: newId, file: target, promptAccepted: false },
-				};
-			}
-			return {
-				content: [
-					{ type: "text", text: `Cloned this session as ${newId}; it is now working on your prompt.` },
-				],
-				details: { sessionId: newId, file: target, promptAccepted: true },
-			};
+			return runClone(ctx as CloneRuntimeContext, params.prompt);
+		},
+	});
+	pi.registerTool({
+		name: "clone_subsession",
+		label: "Clone subsession",
+		description:
+			"Clone the current session into a TRACKED child subsession (same history, like spawn_subsession) " +
+			"and start it with a prompt. Its completion reports back to this session; use " +
+			"list/check/read_subsession and yield_to_subsessions as usual. Returns the child session id.",
+		parameters: Params,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			return runClone(ctx as CloneRuntimeContext, params.prompt, { linkParent: true });
 		},
 	});
 }
